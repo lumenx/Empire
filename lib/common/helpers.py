@@ -35,6 +35,7 @@ Includes:
     complete_path() - helper to tab-complete file paths
     dict_factory() - helper that returns the SQLite query results as a dictionary
     KThread() - a subclass of threading.Thread, with a kill() method
+    slackMessage() - send notifications to the Slack API
 
 """
 
@@ -50,11 +51,25 @@ import iptools
 import threading
 import pickle
 import netifaces
-from time import localtime, strftime
-from Crypto.Random import random
+import random
+
 import subprocess
 import fnmatch
+import urllib, urllib2
+import hashlib
+import datetime
+import uuid
+import ipaddress
+from datetime import datetime
 
+###############################################################
+#
+# Global Variables
+#
+################################################################
+
+globentropy=random.randint(1,datetime.today().day)
+globDebug=False
 ###############################################################
 #
 # Validation methods
@@ -141,6 +156,13 @@ def random_string(length=-1, charset=string.ascii_letters):
     return random_string
 
 
+def generate_random_script_var_name(origvariname,globDebug=False):
+    if globDebug:
+	    return origvariname
+    else:
+	    hash_object=hashlib.sha1(str(origvariname)+str(globentropy)).hexdigest()
+    return hash_object[:-datetime.today().day]
+
 def randomize_capitalization(data):
     """
     Randomize the capitalization of a string.
@@ -166,10 +188,12 @@ def chunks(l, n):
 
 def strip_python_comments(data):
     """
+    *** DECEMBER 2017 - DEPRECATED, PLEASE DO NOT USE ***
+
     Strip block comments, line comments, empty lines, verbose statements,
     and debug statements from a Python source file.
     """
-    # TODO: implement pyminifier functionality
+    print color("[!] strip_python_comments is deprecated and should not be used")
     lines = data.split("\n")
     strippedLines = [line for line in lines if ((not line.strip().startswith("#")) and (line.strip() != ''))]
     return "\n".join(strippedLines)
@@ -542,6 +566,13 @@ def get_config(fields):
     conn.isolation_level = None
 
     cur = conn.cursor()
+
+    # Check if there is a new field not in the database
+    columns = [i[1] for i in cur.execute('PRAGMA table_info(config)')]
+    for field in fields.split(','):
+        if field.strip() not in columns:
+            cur.execute("ALTER TABLE config ADD COLUMN %s BLOB" % (field))
+
     cur.execute("SELECT %s FROM config" % (fields))
     results = cur.fetchone()
     cur.close()
@@ -555,30 +586,40 @@ def get_listener_options(listenerName):
     Returns the options for a specified listenername from the database outside
     of the normal menu execution.
     """
-    conn = sqlite3.connect('./data/empire.db', check_same_thread=False)
-    conn.isolation_level = None
-    conn.row_factory = dict_factory
-    cur = conn.cursor()
-    cur.execute("SELECT options FROM listeners WHERE name = ?", [listenerName] )
-    result = cur.fetchone()
-    cur.close()
-    conn.close()
-
-    return pickle.loads(result['options'])
+    try:
+        conn = sqlite3.connect('./data/empire.db', check_same_thread=False)
+        conn.isolation_level = None
+        conn.row_factory = dict_factory
+        cur = conn.cursor()
+        cur.execute("SELECT options FROM listeners WHERE name = ?", [listenerName] )
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        return pickle.loads(result['options'])
+    except Exception:
+        return None
 
 
 def get_datetime():
     """
     Return the current date/time
     """
-    return strftime("%Y-%m-%d %H:%M:%S", localtime())
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
+def utc_to_local(utc):
+    """
+    Converts a datetime object in UTC to local time
+    """
+
+    offset = datetime.now() - datetime.utcnow()
+    return (utc + offset).strftime("%Y-%m-%d %H:%M:%S")
 
 def get_file_datetime():
     """
     Return the current date/time in a format workable for a file name.
     """
-    return strftime("%Y-%m-%d_%H-%M-%S", localtime())
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def get_file_size(file):
@@ -658,6 +699,8 @@ def color(string, color=None):
             attr.append('31')
         elif color.lower() == "green":
             attr.append('32')
+        elif color.lower() == "yellow":
+            attr.append('33')
         elif color.lower() == "blue":
             attr.append('34')
         return '\x1b[%sm%s\x1b[0m' % (';'.join(attr), string)
@@ -675,6 +718,20 @@ def color(string, color=None):
         else:
             return string
 
+def lastseen(stamp, delay, jitter):
+    """
+    Colorize the Last Seen field based on measured delays
+    """
+    try:
+        delta = datetime.now() - datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+        if delta.seconds > delay * (jitter + 1) * 5:
+            return color(stamp, "red")
+        elif delta.seconds > delay * (jitter + 1):
+            return color(stamp, "yellow")
+        else:
+            return color(stamp, "green")
+    except Exception:
+        return stamp
 
 def unique(seq, idfun=None):
     """
@@ -789,7 +846,7 @@ def get_module_source_files():
                 paths.append(os.path.join(root, filename))
     return paths
 
-def obfuscate(psScript, obfuscationCommand):
+def obfuscate(installPath, psScript, obfuscationCommand):
     """
     Obfuscate PowerShell scripts using Invoke-Obfuscation
     """
@@ -797,20 +854,20 @@ def obfuscate(psScript, obfuscationCommand):
         print color("[!] PowerShell is not installed and is required to use obfuscation, please install it first.")
         return ""
     # When obfuscating large scripts, command line length is too long. Need to save to temp file
-    toObfuscateFilename = "data/misc/ToObfuscate.ps1"
-    obfuscatedFilename = "data/misc/Obfuscated.ps1"
+    toObfuscateFilename = installPath + "data/misc/ToObfuscate.ps1"
+    obfuscatedFilename = installPath + "data/misc/Obfuscated.ps1"
     toObfuscateFile = open(toObfuscateFilename, 'w')
     toObfuscateFile.write(psScript)
     toObfuscateFile.close()
     # Obfuscate using Invoke-Obfuscation w/ PowerShell
-    subprocess.call("powershell 'Invoke-Obfuscation -ScriptPath %s -Command \"%s\" -Quiet | Out-File -Encoding ASCII %s'" % (toObfuscateFilename, convert_obfuscation_command(obfuscationCommand), obfuscatedFilename), shell=True)
+    subprocess.call("%s -C '$ErrorActionPreference = \"SilentlyContinue\";Invoke-Obfuscation -ScriptPath %s -Command \"%s\" -Quiet | Out-File -Encoding ASCII %s'" % (get_powershell_name(), toObfuscateFilename, convert_obfuscation_command(obfuscationCommand), obfuscatedFilename), shell=True)
     obfuscatedFile = open(obfuscatedFilename , 'r')
     # Obfuscation writes a newline character to the end of the file, ignoring that character
     psScript = obfuscatedFile.read()[0:-1]
     obfuscatedFile.close()
-    
+
     return psScript
-    
+
 def obfuscate_module(moduleSource, obfuscationCommand="", forceReobfuscation=False):
     if is_obfuscated(moduleSource) and not forceReobfuscation:
         return
@@ -825,7 +882,8 @@ def obfuscate_module(moduleSource, obfuscationCommand="", forceReobfuscation=Fal
     f.close()
 
     # obfuscate and write to obfuscated source path
-    obfuscatedCode = obfuscate(psScript=moduleCode, obfuscationCommand=obfuscationCommand)
+    path = os.path.abspath('empire.py').split('empire.py')[0] + "/"
+    obfuscatedCode = obfuscate(path, moduleCode, obfuscationCommand)
     obfuscatedSource = moduleSource.replace("module_source", "obfuscated_module_source")
     try:
         f = open(obfuscatedSource, 'w')
@@ -834,17 +892,24 @@ def obfuscate_module(moduleSource, obfuscationCommand="", forceReobfuscation=Fal
         return ""
     f.write(obfuscatedCode)
     f.close()
-    
+
 def is_obfuscated(moduleSource):
     obfuscatedSource = moduleSource.replace("module_source", "obfuscated_module_source")
     return os.path.isfile(obfuscatedSource)
 
 def is_powershell_installed():
+    return (get_powershell_name() != "")
+
+def get_powershell_name():
     try:
         powershell_location = subprocess.check_output("which powershell", shell=True)
     except subprocess.CalledProcessError as e:
-        return False
-    return True
+        try:
+            powershell_location = subprocess.check_output("which pwsh", shell=True)
+        except subprocess.CalledProcessError as e:
+            return ""
+        return "pwsh"
+    return "powershell"
 
 def convert_obfuscation_command(obfuscate_command):
     return "".join(obfuscate_command.split()).replace(",",",home,").replace("\\",",")
@@ -885,3 +950,9 @@ class KThread(threading.Thread):
 
     def kill(self):
         self.killed = True
+
+def slackMessage(slackToken, slackChannel, slackText):
+	url = "https://slack.com/api/chat.postMessage"
+	data = urllib.urlencode({'token': slackToken, 'channel':slackChannel, 'text':slackText})
+ 	req = urllib2.Request(url, data)
+ 	resp = urllib2.urlopen(req)
